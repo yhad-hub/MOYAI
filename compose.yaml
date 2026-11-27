@@ -1,0 +1,17 @@
+services:
+  workspace:
+    build: .
+    init: true
+    command: ["moyai", "dev", "--host", "0.0.0.0", "--port", "8787"]
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - workspace-data:/data
+    restart: unless-stopped
+    stop_grace_period: 90s
+volumes:
+  workspace-data:
+

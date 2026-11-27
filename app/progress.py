@@ -1,0 +1,90 @@
+"""Select public commentary once, durably, for every conversation surface."""
+import json
+from .database import Connection
+
+from app.activity_text import focus_text, public_text
+
+
+INACTIVE = {'stopping', 'completed', 'failed', 'cancelled', 'interrupted', 'idle', 'steered'}
+
+
+def active_turn(conn: Connection, run_id: str) -> int | None:
+    """None is inactive; 0 is a non-chat run with no claimed message."""
+    run = conn.execute('SELECT status,chat_enabled,active_message_id FROM runs WHERE id=?', (run_id,)).fetchone()
+    if not run or run['status'] in INACTIVE:
+        return None
+    if not run['chat_enabled']:
+        return 0
+    message = conn.execute("SELECT id FROM messages WHERE run_id=? AND id=? AND role='user' AND status='running'",
+                           (run_id, run['active_message_id'])).fetchone()
+    return message['id'] if message else None
+
+
+def active_input(conn: Connection, run_id: str, turn_id: int) -> int:
+    # A locked input has been delivered but may not yet be acknowledged. After
+    # acknowledgement use receipt order, not message creation/enqueue order.
+    pending = conn.execute("""SELECT id FROM messages WHERE run_id=? AND steering_parent_id=?
+        AND status='queued' AND queue_locked=1 LIMIT 1""", (run_id, turn_id)).fetchone()
+    if pending:
+        return pending['id']
+    receipt = conn.execute("""SELECT m.id AS input_id FROM events e JOIN messages m
+        ON m.id=json_number(e.data,'message_id') AND m.run_id=e.run_id
+        WHERE e.run_id=? AND e.kind='status' AND json_text(e.data,'phase')='steering'
+        AND json_number(e.data,'turn_id')=? AND m.steering_parent_id=? AND m.status='injected'
+        ORDER BY e.id DESC LIMIT 1""", (run_id, turn_id, turn_id)).fetchone()
+    return receipt['input_id'] if receipt else turn_id
+
+
+def record_focus(conn: Connection, run_id: str, message: str, data: dict[str, object], stamp: str) -> None:
+    """Admit task focus independently of public commentary."""
+    turn_id = active_turn(conn, run_id)
+    message = focus_text(message)
+    if turn_id is None or not message:
+        return
+    input_id = active_input(conn, run_id, turn_id)
+    if turn_id and (type(data.get('input_id')) is not int or data['input_id'] != input_id):
+        return
+    identity = data.get('activity_id')
+    if not isinstance(identity, str) or not identity or len(identity) > 100:
+        return
+    if conn.execute("""SELECT 1 FROM events WHERE run_id=? AND kind='status'
+        AND json_text(data,'activity_id')=? LIMIT 1""", (run_id, identity)).fetchone():
+        return
+    metadata = {'phase': 'focus', 'activity_version': 1, 'live_status': True,
+                'turn_id': turn_id, 'input_id': input_id, 'activity_id': identity}
+    conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status',?,?,?)",
+                 (run_id, message, json.dumps(metadata), stamp))
+
+
+def record(conn: Connection, run_id: str, message: str, data: dict[str, object], stamp: str) -> None:
+    """Caller holds the write transaction across scope lookup and admission.
+
+    Persist complete public commentary once; the model owns when an update is
+    useful. Receipt and input identity survive process/sandbox replacement.
+    """
+    turn_id = active_turn(conn, run_id)
+    message = public_text(message, None).strip()
+    if turn_id is None or not message or message == '[System: Empty message content sanitised to satisfy protocol]':
+        return
+    rows = conn.execute("""SELECT message,data FROM events WHERE run_id=? AND kind='message'
+        AND COALESCE(json_number(data,'turn_id'),0)=?
+        AND COALESCE(json_text(data,'phase'),'') NOT IN ('processing','streaming')""", (run_id, turn_id)).fetchall()
+    previous = [(row['message'], json.loads(row['data'])) for row in rows]
+    if data.get('activity_id') and any(meta.get('activity_id') == data['activity_id'] for _, meta in previous):
+        return
+    # The sandbox may answer before its next model request acknowledges receipt.
+    # Only server-owned, delivered steering children can receive a direct reply.
+    input_id = data.get('input_id')
+    reply = None
+    if turn_id and type(input_id) is int:
+        reply = conn.execute("""SELECT id FROM messages WHERE run_id=? AND id=? AND steering_parent_id=?
+            AND (status='injected' OR (status='queued' AND queue_locked=1))""", (run_id, input_id, turn_id)).fetchone()
+    if input_id is not None and (type(input_id) is not int or (input_id != turn_id and not reply)):
+        return  # Stale/undelivered inputs cannot publish into another input's work.
+    input_id = reply['id'] if reply else turn_id
+    if any(text == message and meta.get('input_id', turn_id) == input_id for text, meta in previous):
+        return
+    metadata = {**data, 'turn_id': turn_id, 'input_id': input_id,
+                'public_update': True, 'public_reply_to': reply['id'] if reply else None}
+    conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'message',?,?,?)",
+                 (run_id, message, json.dumps(metadata), stamp))

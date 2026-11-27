@@ -1,0 +1,49 @@
+{
+  "name": "moyai-ui",
+  "private": true,
+  "scripts": {
+    "build": "vite build --config native/web/vite.config.ts",
+    "build:native": "npm run build",
+    "dev": "vite build --watch --config native/web/vite.config.ts",
+    "typecheck": "tsc --project native/web/tsconfig.json",
+    "typecheck:native": "npm run typecheck",
+    "api:generate": "uv run python -m moyai.openapi_dump native/web/generated/openapi.json && openapi-ts",
+    "api:check": "npm run api:generate && git diff --exit-code -- native/web/generated && test -z \"$(git ls-files --others --exclude-standard -- native/web/generated)\"",
+    "test": "node --test tests/test_native_*.cjs tests/conversations/test_native_*.cjs tests/automations/test_native_*.cjs tests/history/test_native_*.cjs tests/settings/test_native_*.cjs tests/analytics/test_native_*.cjs tests/workspace/test_native_*.cjs tests/navigation/test_native_*.cjs tests/messages/test_native_*.cjs",
+    "test:ui": "node --test --test-concurrency=1 tests/browser/native_*.cjs"
+  },
+  "dependencies": {
+    "@lexical/history": "0.52.0",
+    "@lexical/plain-text": "0.52.0",
+    "@lexical/react": "0.52.0",
+    "@lexical/utils": "0.52.0",
+    "@novnc/novnc": "1.7.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "highlight.js": "^11.11.1",
+    "html-react-parser": "^5.2.7",
+    "lexical": "0.52.0",
+    "lucide-react": "^0.468.0",
+    "micromark-util-decode-string": "2.0.1",
+    "radix-ui": "^1.4.3",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.3.1",
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "@hey-api/openapi-ts": "0.99.0",
+    "@tailwindcss/vite": "^4.1.16",
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/three": "^0.180.0",
+    "playwright": "^1.56.1",
+    "tailwindcss": "^4.1.16",
+    "tw-animate-css": "^1.4.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.12"
+  }
+}

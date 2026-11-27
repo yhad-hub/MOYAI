@@ -1,0 +1,573 @@
+# Using Moyai
+
+[Install Moyai](../README.md#run-locally) · [Documentation](README.md)
+
+## Resize the session sidebar
+
+On desktop, drag the right edge of the left session sidebar to change its width.
+Focus the divider and use Left/Right arrows for 10px steps, or Shift+Left/Right
+for 40px steps. Home/End select the limits; Enter or double-click restores the
+default. Escape cancels a drag. Closing and reopening the sidebar keeps its
+width in the current view; switching conversations or choosing **New session**
+resets it. Mobile navigation remains an overlay. Right-hand panels are unchanged.
+
+## Goals
+
+`/goal` is a native Moyai command available out of the box in ordinary web chats.
+No personal skill, connector, or installation is required. Type `/goal` and
+select **Goal** from the picker. A **Goal** chip appears below the input; type
+your objective and send it. Hover or focus the chip to remove goal mode without
+losing your draft. You can also send `/goal <objective>` directly.
+Moyai saves the objective with the conversation and continues across turns until
+it reports verified completion. Sending another goal stops the previous goal's
+work and starts the replacement, retaining your conversation history.
+Files attached when starting a goal are retained with its first message, using
+the same upload permissions as ordinary chat. Goal controls leave unsent files
+in the composer.
+
+| Command | Action |
+| --- | --- |
+| `/goal <objective>` | Start a goal, replacing any existing goal. |
+| `/goal` | Select goal mode in the composer. |
+| `/goal edit <objective>` | Revise the objective; active goals continue with the revision. |
+| `/goal pause` | Pause work and automatic continuation. |
+| `/goal resume` | Resume the saved goal with its original model and accounts. |
+| `/goal clear` | Stop goal work and remove the goal; retain the conversation. |
+
+The compact bar above the input shows the objective, status, elapsed turn time,
+completed turns, and token usage. Use **Pause goal** or **Resume goal** to control
+work, **Clear goal** to stop and remove it, or **Expand goal** to edit it in the
+side panel. The original message keeps its **Sent as goal** label after editing
+or clearing. No token budget is set by default; the editor's **Goal details**
+contains the optional budget.
+Objectives accept up to 4,000 characters. Follow-up messages steer the work
+without replacing the objective. Questions and approval requests still require
+their normal answers; goal mode never grants additional permissions.
+If a queued follow-up uses a different requester, model, or account selection,
+automatic continuation pauses while the already admitted turn finishes.
+Resuming during that turn preserves its execution identity. Explicit **Pause
+goal** and **Stop** stop the current goal work.
+**Pause goal** retains queued user messages and accepted clarification answers
+until **Resume goal**; accepting an answer while paused does not restart work.
+**Stop**, archiving, and deleting the conversation also suspend continuation.
+Only the conversation owner can change its goal.
+
+An optional `/goal --budget 100000 <objective>` limits automatic continuation
+using the input and output tokens reported by settled turns. This is checked
+between turns; it does not cap an individual in-flight model request. To
+increase it, use `/goal edit --budget 200000 <objective>` and resume.
+
+The native agent uses `get_goal` and `update_goal` to inspect progress and report
+verified completion. A completion report takes effect only after its answer is
+saved. The same reported blocker must recur on three consecutive turns before
+the goal becomes blocked; resuming starts a fresh audit. Failed or interrupted
+execution, changed account access, and uncertain external actions require
+attention rather than automatic retries. Goals survive app and worker restarts.
+
+The command lifecycle follows the
+[Codex goal commands](https://developers.openai.com/codex/cli/slash-commands/#set-or-view-a-task-goal-with-goal).
+Moyai owns persistence and admission; its existing Pydantic AI agent and Temporal
+turn workflow execute every continuation.
+
+## Answering questions
+
+Question cards use the chat's compact typography and numbered vertical options.
+Click a single choice to submit it immediately, or write a response and press
+Enter. Shift+Enter adds a new line. Number keys activate a focused question's
+options; arrow keys move between single choices without submitting. Digits typed
+in the response field remain text. For multi-select questions, choose the
+checkboxes and press Enter when finished. Multiple questions submit once every
+question is answered. Accompanying approvals and credential requests retain
+their explicit Continue step.
+
+If sending fails, your answer and keyboard focus are preserved so you can retry.
+If the answer was accepted but refreshing fails, **Refresh conversation** reloads
+the conversation without sending the answer again.
+
+## Attachments and the computer
+
+The native interface reuses Moyai's navigation style, home constellation and
+interactive sculpture. Start a task directly from the home composer, or continue
+an existing conversation beside the Computer, Activity, Plan and Files panel.
+
+Drop files anywhere in the chat column, choose **Attach**, or paste an image
+with Command/Ctrl+V. New-session, main-chat and side-chat composers show
+removable attachment cards and support file-only messages. A message can contain
+eight files, each up to 20 MB, including PNG, JPEG, GIF and WebP images.
+Images must also be no larger than 20 megapixels. Zip a folder before attaching it.
+Uploads are stored in encrypted objects; admission binds each upload to its
+owner's chosen conversation. Images use native Pydantic `BinaryContent`,
+including when steering a run. Other originals are available through the shared
+`attachment_copy` capability and the SDK's workspace tools, without embedding
+large binary documents in model prompts.
+Attachment cards and local image thumbnails appear immediately, with an
+uploading indicator until the original is saved. Uploads run in bounded parallel
+batches; failed cards can be retried or removed, and incomplete files cannot be
+sent. The first accepted message appears directly in the chat when leaving the
+home screen. Only messages explicitly waiting behind active work appear in the
+queue; **Send now** moves saved input into the transcript while admission settles.
+Session search is available through Command/Ctrl+K rather than a second sidebar
+filter.
+
+The sidebar initially opens **Recent** and closes **Pinned**, **Participated**,
+folders and subagent branches. Expand a section or branch with its toggle;
+explicit choices are remembered per account in this browser. Opening a child
+conversation or refreshing the list does not expand its ancestors. Older
+open-by-default preferences adopt these defaults once. Dropping a session into
+a folder still reveals its destination. Background refreshes keep the list
+steady; loading feedback appears on the first load and when **Show more sessions**
+is clicked.
+
+Saved-file links in the transcript, subagent results and side chats open the
+right-panel preview. Text and Markdown render in the panel; supported images,
+videos and audio use its media viewer. **Download original** remains available
+inside the preview. Reopening the same file selects its existing tab. External
+website links keep their normal behavior.
+
+Sessions open with chat only. **Workspace** opens a compact overlay ordered
+**Pull requests → Subagents → Outputs**, aligned to the main chat's right edge.
+It slides within the chat column, including when another panel is open, and
+respects reduced motion. Selecting a resource opens a right-panel tab. Its **+**
+menu adds Side chat, Files, Computer, Activity or Plan.
+The initial split is **65% chat / 35% panel**. Drag the divider to save a new
+default for this signed-in user and product mode in this browser, across
+conversations and reloads. The divider also supports arrow keys, Shift for larger
+steps, and Enter to restore 65:35. Smaller viewports clamp or stack the panes
+without overwriting that preference.
+After a task creates its Modal workspace, add **Computer** and choose **Open
+computer**, or use the session menu. Background coding and sandbox creation do
+not open the panel automatically.
+
+When a website requires human sign-in, Moyai can call `request_browser_login`
+after opening its sign-in page. The requester sees **Browser sign-in needed**,
+the website and reason, and Computer opens once for that request. Closing the
+panel keeps it closed until **Open Computer** is selected; reloading a waiting
+conversation restores the request. Take control, sign in inside Chromium, then
+select **I've signed in**. This returns your computer control, including control
+held by another of your browser tabs, and resumes Moyai in one step. Another
+person's active control and an unsettled computer action still block the handoff.
+Moyai must inspect
+the page to verify access. Confirmation is not an authentication-success check.
+**Cancel sign-in** resumes with a cancellation so Moyai can explain or continue
+independent work. These requests do not time out and only the original requester
+can answer. A changed computer requires cancelling and making a fresh request.
+
+Opening the computer starts a real X desktop in the same sandbox, with Chromium open and a taskbar.
+The panel shows the desktop itself. Click **Take control** on the screen to
+click, type, paste text and scroll, using Chromium's own tabs and address bar.
+Expand the panel for more space. A **Release control** button stays visible above
+the desktop while you control it, including when the stream disconnects or
+another of your tabs holds control;
+Ctrl+Shift+Escape also returns control. Leaving or
+reloading the page releases this browser's control.
+
+Desktop access follows session visibility and rechecks the workspace's current
+account grants. A private session is owner-only; workspace members can view and
+take turns controlling a shared session's computer, including its browser sign-ins.
+A persistent database lease allows one human controller at a time.
+Chat, native coding work, and steering continue while a person controls the
+desktop. An idle conversation starts new work normally. Abandoned leases expire. Input is
+serialized in the UI and guest; uncertain input is not automatically repeated.
+An in-flight action also prevents another tab from releasing control, and
+expired input is rejected in the guest before dispatch.
+The desktop uses noVNC over an authenticated, origin-checked application WebSocket.
+Raw VNC and browser debugging listeners stay on guest loopback. Hidden tabs pause
+their display/input transport while retained control leases keep their heartbeat.
+
+Files and browser sign-ins placed in this computer are accessible to
+code running there. The human input lease is not a security boundary against
+native shell execution. The agent's `browser_open`, `browser_action` and
+`browser_read` tools use the same visible Chromium. A human control lease refuses
+new automated browser writes while chat and coding continue. Ambiguous browser
+writes retain durable effect receipts and are not automatically repeated.
+Restrictions on the app's connected-service
+tools do not restrict an account signed into manually inside Chromium.
+
+Existing computers install the desktop prerequisites on first opening; new
+images include them. This adds basic viewing/control, not every legacy computer
+feature. Desktop recording, automatic workspace restoration, and restored
+browser-login workflows remain outside this implementation.
+
+The sidebar separates **Participated** (another person's shared session you have
+sent a message to) from **Recent** (sessions you created, including linked Slack
+history). This personal list applies to administrators too; unrelated shared
+sessions remain accessible through search or a direct link. Participated starts collapsed; an explicit
+expansion is remembered. Session action menus contain commands for that session;
+the dedicated New session controls create a new one. Pins, folders, collapsed groups and unread
+state are personal. Folder creation, rename and removal preserve session sharing.
+The session menu offers rename, folder placement, copy link, open computer,
+read/unread, pin, archive and delete; owner-only actions are enforced by the API.
+The header and sidebar use the same menu. Deleted conversations can be restored
+from the Deleted list once any active work has stopped. Restore preserves saved
+answers and downloads and does not restart cancelled work.
+
+**Workspace** opens an overlay of pull requests, subagents and outputs. Uploaded
+sources and saved outputs are also available in the Files tab.
+New ordinary subagents open as full private conversations: select one under
+**Workspace → Subagents**, then message, queue a follow-up, use **Send now**,
+answer questions, or stop it with the normal session controls. **Parent chat**
+returns to the conversation that delegated the work. Each child retains its
+history and has its own computer. In the left sidebar, children nest beneath their
+parent in a collapsible group. Select a child to open its full conversation, or
+choose **Open in side chat** from its row, menu, or Workspace entry to chat with
+the same child in the right panel. The parent stays open and keeps its draft.
+Older SDK subagents expose their answers and recorded steps to everyone who can
+read the parent conversation.
+See [Subagent chats](subagent-chats.md) for lifecycle and migration details. Saving a
+file with `save_artifact` adds an output, and `attach_link` adds a PR, external
+output or source. PR links in the public transcript also appear as mentioned PRs.
+
+PR badges in the sidebar and overview use the same GitHub state. The in-app PR
+view shows changes, description, discussion, commits and checks. Public PRs need
+no connection; private PRs use eligible native GitHub connections. Shared
+conversations never use a viewer's personal connection. Anonymous reads are
+cached for five minutes, with explicit Refresh available. Large or omitted
+GitHub patches are labelled; this is a read-only viewer.
+
+Queued messages appear above the composer. **Edit** loads their text into that
+same composer and keeps attachments; Save/Cancel restore the unsent draft.
+**Send now** promotes the existing message through the native Temporal signal
+and Pydantic `AgentRun.enqueue` path. A message already admitted cannot be edited.
+
+New tasks and their delegated agents have no fixed model-request-count limit.
+Long tasks can continue past the former 100-round parent and 50-round delegate
+caps. Stop remains available while work is running. Existing failed turns are
+not restarted automatically.
+
+## Settings and administration
+
+The account's Settings button opens a dedicated rail with Overview, General, Skills,
+Automations, Memory, Connections and Secrets. Administrators also see Users,
+Performance and Spend & usage. These pages use native application records,
+or the connected product's account services when running in a hosted workspace.
+
+- **General:** save your message-delivery and connection preferences. **Queue next**
+  waits for the current task; **Send now** delivers input as soon as the run can
+  accept it.
+- **Skills:** type `/` anywhere in the home or conversation composer, then search
+  by name. Use the arrow keys and Enter/Tab, or click a result, to insert an
+  inline icon-and-name token at the cursor, such as **Team** for `/team`.
+  Every skill uses the same document icon in the picker and saved messages.
+  Keep typing before or after it; Backspace removes it, or select the token
+  and press Delete. Copy/paste within
+  Moyai and queued-message editing preserve the selection. Sent messages retain
+  the selected name after reload, even if the skill is subsequently
+  changed or removed. Code examples and escaped references remain literal.
+  A unique leading `/team` short name also works when sent directly; duplicate
+  names require a scoped reference from the picker.
+  In Slack, send `/team investigate this` or `Can you use /team for this?` to
+  invoke the actual saved skill. Inline requests recognize `use`, `invoke`,
+  `run`, `apply` and `load`; merely discussing a name (`explain /team`) does not
+  invoke it. Use `/org:team` to disambiguate an organization skill.
+  Paths, links, quoted examples, block quotes, escaped references and code stay
+  literal. Only the signed sender's message selects skills; fetched thread
+  context and attachments cannot. Missing or ambiguous selections are rejected.
+  Assistant replies and work updates reuse the same icon and readable name for
+  skills selected in that conversation, including streamed text and saved updates
+  after reload. Plain references and standalone inline-code references such as
+  `/team` are supported; code blocks, command snippets, paths, links and escaped
+  examples stay literal. Unknown or ambiguous short names stay unchanged.
+  This display uses saved selection metadata and makes no additional library
+  request or skill invocation.
+  Personal skills are limited to their owner's private web conversations,
+  including replies from the verified owner's explicitly linked Slack DM.
+  Ordinary Slack channels and bot DMs are shared execution contexts and can
+  invoke organization skills only; a DM alone does not grant personal access.
+  Existing-product installations load the original personal/organization
+  instructions and supporting-file contents at execution, without converting or
+  rewriting the library. Archived, disabled, inaccessible or ambiguous skills
+  fail explicitly. Up to eight skill selections and 500,000 characters
+  of combined skill context are supported per message. Supporting-file contents
+  are provided to the agent; files needed for execution must first be written
+  to its workspace. Standalone bundled and saved skills also remain available
+  through Pydantic's deferred capability mechanism.
+  In existing-product installations, ask the agent to create, read, update or
+  delete a saved skill. Its `skill_list`, `skill_read`, `skill_create`,
+  `skill_update` and `skill_delete` tools use the same canonical library.
+  Personal writes require an individual requester in a private web chat;
+  organization writes require an administrator in a shared web or Slack chat.
+  Slack management requires a fresh, unambiguous link to an eligible individual
+  account; the linked account's current role is checked for every operation.
+  Personal management also works through the owner's explicitly linked private
+  web-session DM, but not in ordinary Slack-origin chats. Delegated
+  and automated work cannot manage skills. Updates require the revision from
+  a fresh read and preserve supporting files when omitted. Delete archives a
+  skill and removes it from the picker; ask to restore it to make it available
+  again. Changes apply to subsequent invocations. Bundled skills remain unchanged.
+  **Automatic skill learning** can save reusable procedures from completed web
+  chats: private chats produce personal skills, and administrators' shared chats
+  can produce organization skills. Both settings start disabled. Learned skills
+  include source evidence and can be reused in later relevant web chats; manual
+  edits and archived skills are never overwritten. See [skill learning](skill-learning.md).
+- **Memory:** inspect and edit the Harness memory store in your authorized
+  namespaces. Version checks reject conflicting edits. Other users' personal
+  memory is not available to administrators.
+- **Automations:** interval schedules use Temporal Schedules and admit ordinary
+  native turns with deduplicated occurrence receipts. Pause/delete fences new
+  admissions; work already admitted follows the normal Stop controls. Creation
+  requires a registered Settings worker. Schedules are private and belong to
+  their requester.
+- **Connections:** manage accounts and remote MCP servers available to your chats.
+  Hosted workspaces show organization accounts alongside personal and shared MCP
+  connections. Choose defaults in **General**.
+- **Secrets:** encrypted personal/shared storage with metadata-only reads and
+  rotation. Values are never returned to the browser or automatically injected
+  into tools or computers. Explicit scoped runtime secret grants remain future
+  product work.
+- **Users:** manage local accounts, roles and enabled state. Changes invalidate
+  prior authentication; the final enabled administrator cannot be disabled or
+  demoted.
+- **Analytics:** filter and export recorded usage and turn timing. Performance
+  leads with API receipt → first foreground LiteLLM outbound attempt, with mean,
+  p50, p95 and coverage. Its API → worker, worker → broker and broker → dispatch
+  means share one complete cohort and add to that cohort's total. This endpoint
+  is dispatch, not LiteLLM receipt or model time to first token.
+  First computer readiness is separate: cold creation, snapshot restoration and
+  reuse end at a successful SDK workspace check. Preparation alone is not ready;
+  failed and incomplete acquisitions have separate counts. Full turn duration
+  remains available under an expandable section.
+
+The Performance page uses four cards in a two-column grid for startup, queue
+pickup, broker preparation and computer readiness. Each card includes its
+average, median/p50, p95, slowest observation and coverage. A trend graph below
+uses up to 24 fixed intervals across the selected range, grouped by admission time;
+missing intervals are gaps. Cards and trends use the entire filtered cohort,
+independently of the recent-turn table's pagination. The cards measure overlapping
+intervals; only the complete-cohort startup breakdown is additive.
+
+Native timings live as content-free `performance.v1.*` observations in the
+existing `moyai_events` table. Every new turn commits a receipt in its admission
+transaction, including Slack, scheduled/internal inputs, approval resumes and
+Slack control notices. Successful preparation commits its worker observation
+with the prepared turn, replacing the separate timing transaction.
+
+Web messages and web approval replies start at server HTTP receipt. Other
+admissions start at entry to native admission, excluding upstream delivery or
+scheduler delay. Each exported row identifies `timing_start_source` and
+`timing_surface`. The existing `api_received_at`, `api_to_dispatch_ms` and
+`api_to_worker_ms` keys are retained for compatibility; they now refer to this
+explicit per-row receipt boundary, which is not always an HTTP API boundary.
+
+Dispatch telemetry never awaits persistence before the outbound attempt. One
+background writer per database instance coalesces observations by turn, writes
+up to 32 at a time, and retries transient failures up to three times with a
+one-second timeout per attempt. Its pending queue and successful-observation
+cache are each capped at 4,096 turns. Database conflict handling still selects
+the earliest observation across processes, keeping its own broker timestamp.
+Retries concern telemetry only and never repeat inference. Deleted turns cannot
+discard other turns' observations in a batch.
+
+Each card accounts for all admissions in range:
+`total = samples + pending + missing + excluded`. Its `reasons` counts sum to
+`total`; per-turn `*_timing_status` fields are available in the table and CSV.
+Steering inputs and control notices are explicitly excluded from startup
+averages. Missing receipt evidence, old/uninstrumented records, invalid clocks,
+failed or incomplete acquisitions, and missing telemetry have distinct reasons.
+An ended turn without dispatch evidence does **not** prove dispatch never happened.
+Turns with no computer acquisition recorded are not zero-duration successes.
+Turns pulled into usage by an inference outside their admission window are
+marked `outside_range` and do not change the admission cohort.
+
+The writer remains bounded best effort: process crashes, sustained storage
+outages or queue exhaustion can lose dispatch observations. Such turns retain
+their durable admission and show a missing-observation status. Computer
+acquisition writes also remain best effort. Accounting for a turn is not a claim
+that every timing was captured.
+
+Roll out the native frontend, API, execution worker
+and broker together through the normal release process; no schema migration or
+new Temporal workflow commands are introduced. Existing history is not backfilled.
+Delegated and maintenance model calls do not become additional foreground
+startup samples. The report keeps missing evidence unknown,
+requires ordered server clocks, and uses the first observed outbound attempt's
+own broker receipt even if retries settle out of order. Measurements appear on
+`/api/settings/performance` and in its per-turn CSV export.
+
+## Separate API and workers (standalone installations)
+
+Configure a Temporal service, `TEMPORAL_TASK_QUEUE`, a dedicated PostgreSQL
+database, a shared `ENCRYPTION_KEY`, and shared object storage. Use the same
+configuration on every API and worker:
+
+```sh
+uv run moyai serve --host 127.0.0.1 --port 8796
+uv run moyai worker
+```
+
+The API owns admission/dispatch and optional Slack delivery. Workers execute the
+registered native activities. Use HTTPS at the application edge,
+`MOYAI_PUBLIC_URL`, and `MOYAI_SECURE_COOKIES=true`.
+
+Application tables have a `moyai_` prefix. Harness manages its own native tables.
+Standalone development can bootstrap its own database. Existing-product mode
+uses the canonical product database with an explicitly provisioned native schema,
+reuses canonical identities and exposes historical sessions as read-only history.
+Old sandboxes and pending workflows are not implicitly converted.
+
+Existing-product startup verifies versioned application and Harness provisioning
+receipts. It never bootstraps a replacement user directory. The stock Harness
+stores still perform their documented lazy, idempotent DDL on first use; see the
+deployment boundary for required permissions and explicit provisioning commands.
+Drain or version active Temporal workflows before changing registered activity
+names or pinned SDK execution behavior.
+
+## Accounts and integrations
+
+Add accounts in **Connections**, then set your preferences in **Settings → General**.
+**Use chat defaults** retains a continuation's latest selection when it belongs to
+you. New existing-product chats use available accounts; standalone chats start
+without accounts. **Choose connections** saves your own selection for future
+messages. Only accounts permitted in the chat are used. Read-only is the default;
+non-read-only tools require explicit approval by default.
+
+Personal accounts are restricted to private web conversations. Shared web
+conversations use explicitly shared accounts. A live computer is bound to its
+account context; changing that context requires a new conversation, rather than
+inheriting files from an account that is no longer selected.
+
+- GitHub uses a token with the intended repository permissions.
+- Linear uses an API key or OAuth access token.
+- Notion's hosted tools require an OAuth access token, not an integration token.
+- Personal Slack tools require a user token, not a bot token.
+
+To add a remote MCP connection, open **Settings → Connections → Add MCP
+connection** in a hosted workspace, or **Add connection** and select **MCP
+server / gateway** in standalone Moyai. Enter a name and a Streamable HTTP server
+URL such as `https://gateway.example.com/mcp`. Leave **Bearer token** blank for
+an unauthenticated server, or enter its bearer token. Interactive OAuth, local
+stdio servers and custom authentication headers are not supported.
+
+Personal MCP connections are available in your private web chats. Administrators
+can publish their own connections with **Share with workspace members**. Only
+the owner can edit a connection, and editing a shared connection also requires
+administrator access. **Enable this connection** controls whether new work can
+use it. Existing allowed-tool and approval policies are preserved when editing.
+
+After saving, use **Check connection** to preview the tools available under the
+connection's policy. This discovers tools without executing them; a successful
+check does not verify every tool's behavior. A failed check leaves the saved
+configuration intact and can be retried. With **Read only** enabled, only tools
+explicitly marked read-only by the server are available. Server annotations are
+hints, so use servers you trust.
+
+Saved bearer tokens are never returned to the browser. When editing, leave
+**Replacement bearer token** blank to keep the existing token, or select
+**Clear saved token** to remove it. Changing the server URL requires a replacement
+token or an explicit clear, including when the server uses no authentication.
+This prevents a saved token from being sent to a different server by accident.
+MCP endpoints use public HTTPS by default. For a private gateway, set
+`MOYAI_MCP_ALLOWED_ORIGINS='["https://gateway.internal.example.com"]'` on both
+the API and worker. Entries are exact origins, including any nonstandard port,
+without a path. A local development server can use an explicitly allowed HTTP
+origin such as `http://127.0.0.1:8000`. Only add origins your users should be
+allowed to reach.
+
+Redirects and environment proxies are disabled. The server must support
+uncompressed responses. Tool listing has a 30-second deadline and each MCP
+connection session accepts at most 16 MiB of response data. Shared MCP
+connections are selectable in web chats; adding one does not automatically
+enable it in Slack conversations.
+
+Moyai uses the SDK's provider tool catalog and schemas. Token permissions establish
+resource access. An optional `allowed_tools` policy narrows the catalog further.
+Built-in provider connections exclude merge, approving-review and repository deletion tools. Account
+credentials never enter the coding computer, so a shell cannot obtain a
+merge-capable token from the application's connection configuration.
+
+Live provider qualification requires configured test accounts. Installing a
+capability is not evidence that every remote operation or legacy connector
+contract is available.
+
+## Slack bot surface
+
+The bot surface is separate from personal Slack tools. Set
+`SLACK_SIGNING_SECRET`, `SLACK_BOT_TOKEN`, `SLACK_TEAM_ID`, and an HTTPS
+`MOYAI_PUBLIC_URL`. Register `/hooks/slack` as the event endpoint. Configure the
+bot's mentions/messages and ordinary message-posting/history permissions.
+
+Create an application user linked to a verified Slack member ID:
+
+```sh
+uv run moyai user teammate --name "Teammate" --slack-user U0123456789
+```
+
+The command asks for the application password privately. Unlinked users cannot
+start work. Mentions create a thread conversation; replies from its original
+linked requester steer or queue work. All Slack-origin conversations have private
+web access for that requester. This avoids equating channel membership with
+workspace-wide sharing.
+
+Slack memory is isolated per thread and requester; it does not inject personal
+web-chat memory into a channel. Connected accounts are disabled for Slack-origin
+conversations until destination-specific export policies are implemented. The
+web interface identifies that its replies are delivered to Slack.
+
+Signed events are persisted before acknowledgment and deduplicated. Outgoing
+answers have persistent send ownership across network waits. A lost send
+acknowledgment is checked against Slack metadata; it is never automatically
+reposted. A missing receipt remains uncertain, including when a thread read is
+truncated or unavailable.
+
+The initial bot adapter sends a bounded answer and a link to the conversation.
+Questions and approvals are completed in the authenticated web app. Rich Slack
+cards, media uploads, OAuth onboarding and the full legacy Slack command set are
+not implemented by this adapter.
+
+## Behavior and recovery
+
+- Repeated client request identities do not admit duplicate turns.
+- Queued messages can be edited or cancelled until admission.
+- **Send now** uses the native pending-message mechanism. A changed requester,
+  model or connection set becomes a follow-up rather than inheriting an active
+  run's authority.
+- When Moyai asks one ordinary clarification question, its requester can type
+  an answer in the main composer or use the question form. Multiple questions,
+  approvals and credential requests retain their dedicated forms. Other
+  participants can queue context but cannot answer for the requester.
+- Required questions wait for an explicit answer. The agent can mark a
+  preference question optional; its persisted deadline defaults to 90 seconds
+  (`MOYAI_OPTIONAL_QUESTION_TIMEOUT`, 5–900 seconds). An unanswered optional
+  question returns “no answer received” to the agent, which must state its
+  assumption. No option is selected and no permission is granted by timeout.
+- Applying a question answer reserves the resumed turn ahead of queued
+  follow-ups. Those messages remain saved until the deferred tool result has
+  been processed. Deploy the API and coordinator changes together; older
+  coordinators do not dispatch a reserved queued resume turn.
+- **Stop** revokes unstarted work before requesting Temporal cancellation.
+  Failed cancellation RPCs are reconciled. Native foreground-command cancellation
+  is exercised by the tests. Already returned background process handles and
+  external writes remain real effects; cancellation cannot undo them.
+- Model and tool attempts recheck current authorization at the activity boundary.
+  An approval cannot restore a revoked account grant.
+- Native working-history search and memory are scoped independently of the
+  shared product conversation. Private and shared memory namespaces differ.
+  Hosted [personal memory](personal-memory.md) can recall existing preferences
+  in private chats; notes learned there remain limited to private chats.
+- A possibly dispatched shell or connected-service write retains an unresolved
+  receipt. Another write is blocked even if the model changes the call ID.
+  The requester can record inspected evidence using
+  `GET /api/sessions/{id}/effects` and `POST /api/effects/{id}/resolve`.
+  This is conservative uncertainty handling, not exactly-once external execution.
+- Before dispatching a shell command, Moyai checks the computer and retries a
+  transient readiness failure once. If that check fails, the command is recorded
+  as not executed and the agent receives the reason without an action-review
+  form. An expired computer does not erase uncertainty about a command that
+  already started, and a missing computer is never silently replaced with an
+  empty one.
+- The answer is committed before computer snapshot settlement. A snapshot failure
+  produces a warning without replacing the received answer.
+- Deferred requests also checkpoint their computer before becoming ready for a
+  response. A cold continuation restores an eligible saved filesystem image before
+  native execution, preserving the conversation, deferred results and effect
+  receipts. Missing/stale images and uncertain actions fail closed; there is no
+  empty-workspace fallback. See [workspace recovery](pydantic-workspace-recovery.md)
+  for authority checks, the 30-day image retention policy and process-state limits.
+- Native model-client HTTP retries are disabled. Temporal allows up to three
+  model attempts; writes and arbitrary shell dispatch have one automatic attempt.
+  Specifically classified reads can have three attempts.
+
+Step, memory and plan stores contain private application data. Protect and back
+up the database. Application secrets, saved artifacts and Temporal payloads,
+including encoded failure attributes, are encrypted. Large Temporal payloads are
+offloaded to immutable private objects. Keep those objects for the lifetime of
+the corresponding workflow histories.

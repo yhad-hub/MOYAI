@@ -1,0 +1,210 @@
+"""Pre-extraction public contracts and a fresh-process runtime import boundary."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from dataclasses import asdict
+from pathlib import Path
+
+import pytest
+from app import automation_definitions as definitions
+from app.automation_sources import EventTrigger
+from pydantic import ValidationError
+
+ROOT = Path(__file__).resolve().parents[2]
+
+# Captured from app.automations before the classes moved, using this locked environment.
+SCHEMAS = {
+    "Timing": "5d8e69b8a893a58ea2c38111ff2cbc8ef15334e61bc64d52422c65902402b9aa",
+    "Trigger": "7827c8784dc6fe983b6e1d798ec8ba9a204069b2ef37259926dbd9b0146ffe71",
+    "Definition": "0ee02561eaec4447d461328107f5fe37f3f8ff934103b9b01853c8c7df99d7c2",
+    "Save": "a048d7711cba3ae5c750e98ff57c868fe4047aed3b4f13f1e02523f882648fdd",
+    "Toggle": "c6ffe919534ad3d527da7aacc5e1d922f3ec491fa5daf783d1abc1c9debd1bee",
+    "Launch": "2b265487e5f28e0288bd83a68006a6b6b5acbec0d713a8d0ae6c19a8e751272a",
+    "Claim": "eff2fee5396f1339fb8a34bb235debead39d65b130bf7e855f4c274844187ff1",
+}
+SCHEDULES = {
+    "hourly": "8099acb018ef9acb604a456982f3babcc0b73e0ac678cae2dbf6d8f5f3b4bde2",
+    "daily": "22fdd4efafaa3ed0170acb2441961982f08de3af12c2aad9a34534ed7e1986f1",
+    "weekdays": "b658b26ebb332b1ded7df7effea9c32ef78badbe1d3dc4be56bc54886fc41bb5",
+    "weekly": "e1c027b4caeb48dfaa218a2282773199e571cf034151a2be18faa36d54b1cbaa",
+    "cron": "996f2ef851a41d955b86d68300f97f17f6e4bd6b24700180a59f3a3b4509ce07",
+    "once": "4a59a39b088af01cd62f47aee35303d04889e61663d44040054266fcc604a267",
+}
+
+
+@pytest.mark.parametrize("name", SCHEMAS)
+def test_json_schema_matches_original_public_contract(name):
+    schema = getattr(definitions, name).model_json_schema()
+    # The separately authorized native-session trigger extension changes only
+    # this bound; every other part of the extracted contract stays identical.
+    event = schema.get("$defs", {}).get("EventTrigger")
+    if event is not None:
+        assert event["properties"]["session_id"]["maxLength"] == 36
+        event["properties"]["session_id"]["maxLength"] = 32
+        assert event["properties"].pop("gitlab_origin")["default"] == ""
+    # Chat continuation adds one optional destination; retain the original contract otherwise.
+    definition = schema if name == "Definition" else schema.get("$defs", {}).get("Definition")
+    if definition is not None:
+        kind = definition["properties"].pop("kind")
+        assert kind["enum"] == ["task", "attention"] and kind["default"] == "task"
+        assert "kind" not in definition.get("required", [])
+        attention = definition["properties"].pop("attention_mode")
+        assert attention["enum"] == ["focused", "discovery"] and attention["default"] == "focused"
+        sources = definition["properties"].pop("attention_sources")
+        assert sources["maxItems"] == 4
+        assert "attention_mode" not in definition.get("required", [])
+        assert "attention_sources" not in definition.get("required", [])
+        schema["$defs"].pop("AttentionSource")
+        destination = definition["properties"].pop("session_id")
+        assert destination["default"] is None
+        assert "session_id" not in definition.get("required", [])
+        assert definition["properties"].pop("gitlab_project_id")["default"] is None
+        visibility = definition["properties"].pop("visibility")
+        assert visibility["enum"] == ["private", "shared"] and visibility["default"] == "shared"
+        assert definition["properties"].pop("connection_ids")["maxItems"] == 30
+        assert "connection_ids" not in definition.get("required", [])
+        plugins = definition["properties"]["plugins"]
+        assert "gitlab" in plugins["items"]["enum"]
+        plugins["items"]["enum"].remove("gitlab")
+        assert plugins["maxItems"] == 5
+        plugins["maxItems"] = 4
+    assert hashlib.sha256(json.dumps(schema, sort_keys=True).encode()).hexdigest() == SCHEMAS[name]
+
+
+@pytest.mark.parametrize("session_id", ["a" * 32, "d2aeb2f5-4295-49c3-98a4-66f996546743"])
+def test_session_event_preserves_exact_legacy_and_native_identity(session_id):
+    trigger = EventTrigger(provider="session", event="message.posted", session_id=session_id)
+    assert trigger.session_id == session_id
+    assert EventTrigger.model_validate_json(trigger.model_dump_json()).session_id == session_id
+
+
+@pytest.mark.parametrize("session_id", [
+    "a" * 31, "a" * 35, "a" * 36, "a" * 37,
+    "google:subject", "d2aeb2f5_4295_49c3_98a4_66f996546743",
+])
+def test_session_event_does_not_guess_or_rewrite_unknown_identifiers(session_id):
+    with pytest.raises(ValidationError):
+        EventTrigger(provider="session", event="message.posted", session_id=session_id)
+
+
+@pytest.mark.parametrize("frequency", SCHEDULES)
+def test_temporal_schedule_conversion_matches_original(frequency):
+    timing = definitions.Timing.model_validate({
+        "frequency": frequency, "time": "13:07", "weekday": 3, "timezone": "America/Los_Angeles",
+        "cron": "*/5 1-3 * * 1,5", "run_at": "2027-02-01T18:37:00-08:00",
+    })
+    rendered = json.dumps(asdict(timing.spec()), sort_keys=True, default=str)
+    assert hashlib.sha256(rendered.encode()).hexdigest() == SCHEDULES[frequency]
+
+
+def test_legacy_draft_upgrade_keeps_defaults_and_shared_definition_semantics():
+    draft = definitions.Definition.model_validate({
+        "name": " Daily check ", "prompt": " Read the queue ", "timing": {"frequency": "daily"},
+    })
+    assert draft.name == "Daily check" and draft.prompt == "Read the queue"
+    assert draft.triggers[0].id == "default"
+    assert draft.triggers[0].schedule.frequency == "daily"
+    assert draft.harness == "hermes" and draft.mode == "modal"
+    assert draft.max_runs_per_hour == 50 and not draft.queue_events
+    assert draft.visibility == "shared" and draft.connection_ids == []
+    assert draft.self_management.allowed() == []
+    assert definitions.Definition.model_validate_json(draft.model_dump_json()) == draft
+    event = definitions.Definition.model_validate({
+        "name": "Slack check", "prompt": "Read the message",
+        "event": {"provider": "slack", "event": "message.posted", "text_contains": "status", "max_runs_per_hour": 9},
+    })
+    assert event.max_runs_per_hour == 9 and event.triggers[0].event.provider == "slack"
+
+
+def test_gitlab_definitions_retain_origin_and_separate_project_identity():
+    definition = definitions.Definition(
+        name="GitLab check", prompt="Read the project",
+        repo_url="https://gitlab.example/team/subgroup/project.git",
+        gitlab_project_id=42, plugins=["gitlab"],
+    )
+    assert definition.repo_url == "https://gitlab.example/team/subgroup/project"
+    assert definition.github_repository_id is None
+    assert definitions.Definition.model_validate_json(definition.model_dump_json()) == definition
+    with pytest.raises(ValidationError):
+        definition.model_validate({**definition.model_dump(), "github_repository_id": 42})
+    with pytest.raises(ValidationError):
+        definition.model_validate({**definition.model_dump(), "repo_url": "https://github.com/team/project"})
+
+
+def test_optional_gitlab_fields_preserve_old_automation_digest():
+    from moyai.automations.product_automations import _digest, definition_digest, definition_payload
+
+    definition = definitions.Definition(
+        name="Existing GitHub", prompt="Read the issue",
+        triggers=[{"id": "issues", "event": {
+            "provider": "github", "event": "issues", "repository": "team/project", "repository_id": 42,
+        }}],
+    )
+    old_payload = definition.model_dump(
+        mode="json", exclude={"session_id", "gitlab_project_id", "visibility", "connection_ids", "kind",
+                             "attention_mode", "attention_sources"},
+    )
+    old_payload["triggers"][0]["event"].pop("gitlab_origin")
+    assert definition_payload(definition) == old_payload
+    assert definition_digest(definition) == _digest(old_payload)
+
+
+def test_gitlab_events_match_permanent_project_and_origin_but_keep_legacy_path_filters():
+    from app.automation_sources import normalize
+
+    trigger = EventTrigger(
+        provider="gitlab", event="merge_request", repository="team/original",
+        repository_id=42, gitlab_origin="https://gitlab.example",
+    )
+    payload = {
+        "object_kind": "merge_request",
+        "project": {"id": 42, "path_with_namespace": "team/renamed", "web_url": "https://gitlab.example/team/renamed"},
+        "object_attributes": {"iid": 7, "title": "Test change", "action": "open"},
+    }
+    assert normalize(trigger, payload) is not None
+    payload["project"]["web_url"] = "https://other-gitlab.example/team/renamed"
+    assert normalize(trigger, payload) is None
+    payload["project"]["web_url"] = "https://gitlab.example/team/renamed"
+    payload["project"]["id"] = 99
+    assert normalize(trigger, payload) is None
+    legacy = EventTrigger(provider="gitlab", event="merge_request", repository="team/renamed")
+    assert normalize(legacy, payload) is not None
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("Timing", {"timezone": "../../bad"}),
+    ("Timing", {"frequency": "cron", "cron": "61 * * * *"}),
+    ("Timing", {"frequency": "once", "run_at": "2027-02-01T18:37:00"}),
+    ("Trigger", {"id": "both", "schedule": {}, "event": {"provider": "slack", "event": "message.posted"}}),
+    ("Trigger", {"id": "neither"}),
+    ("Definition", {"name": "Task", "prompt": "Work", "visibility": "public"}),
+    ("Definition", {"name": "Task", "prompt": "Work", "metadata": {"": "invalid"}}),
+    ("Definition", {"name": "Task", "prompt": "Work", "repo_url": "https://attacker.invalid/repo"}),
+    ("Launch", {"revision": 1, "client_id": "arbitrary:key"}),
+    ("Claim", {"item_key": ""}),
+])
+def test_original_validation_still_rejects_invalid_inputs(name, value):
+    with pytest.raises(ValidationError):
+        getattr(definitions, name).model_validate(value)
+
+
+def test_pure_import_avoids_database_and_retired_executors():
+    result = subprocess.run(
+        [sys.executable, "-c", (
+            "import sys; from app import automation_definitions as d; "
+            "assert not any(n in sys.modules for n in "
+            "('app.main','app.runner','app.db','app.automations','app.automation_events',"
+            "'app.agent_runtime','app.durable_runner','agents','deepagents','langgraph')); "
+            "assert d.SelfManagement(instructions=True).allowed()==['instructions']; "
+            "print('pure imports preserved')"
+        )],
+        cwd=ROOT, env={"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(ROOT)},
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "pure imports preserved"

@@ -1,0 +1,32 @@
+name: Frontend
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  ui:
+    runs-on: ubuntu-latest
+    # The full browser suite can take ~14 minutes on CI; allow dependency/build
+    # setup and runner variance without truncating the final checks.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4.4.0
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.88.0'
+      - uses: astral-sh/setup-uv@v6.8.0
+        with:
+          python-version: '3.13'
+      - run: uv sync --frozen
+      - run: npm run api:check
+      - run: npm run typecheck
+      - run: npm run build
+      - run: test -z "$(git ls-files -- native/src/moyai/static)"
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:ui

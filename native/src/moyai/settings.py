@@ -1,0 +1,255 @@
+"""Application configuration. Credentials stay on the trusted API/worker hosts."""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import os
+import secrets
+import tempfile
+from functools import cached_property
+from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
+
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", populate_by_name=True, hide_input_in_errors=True,
+    )
+
+    data_dir: Path = Field(default=Path(".data"), validation_alias="DATA_DIR")
+    database_url: str = Field(default="", validation_alias="MOYAI_DATABASE_URL")
+    database_pool_size: int = Field(default=8, ge=1, le=256, validation_alias="MOYAI_DATABASE_POOL_SIZE")
+    product_mode: Literal["standalone", "existing"] = Field(
+        default="standalone", validation_alias="MOYAI_PRODUCT_MODE",
+    )
+    database_schema: str = Field(
+        default="", pattern=r"^(?:[a-z][a-z0-9_]{0,62})?$",
+        validation_alias="MOYAI_NATIVE_DATABASE_SCHEMA",
+    )
+    native_schema_mode: Literal["auto", "bootstrap", "verify"] = Field(
+        default="auto", validation_alias="MOYAI_NATIVE_SCHEMA_MODE",
+    )
+    encryption_key: SecretStr = Field(default=SecretStr(""), validation_alias="ENCRYPTION_KEY")
+    workspace_password: SecretStr = Field(default=SecretStr(""), validation_alias="WORKSPACE_PASSWORD")
+    administrator: str = Field(default="admin", validation_alias="MOYAI_ADMIN_USER")
+    gateway_url: str = Field(default="", validation_alias="LITELLM_API_BASE")
+    gateway_key: SecretStr = Field(default=SecretStr(""), validation_alias="LITELLM_API_KEY")
+    trace_endpoint: str = Field(default="", validation_alias="LITELLM_TRACE_ENDPOINT")
+    trace_api_key: SecretStr = Field(default=SecretStr(""), validation_alias="LITELLM_TRACE_API_KEY")
+    trace_include_content: bool = Field(default=False, validation_alias="LITELLM_TRACE_INCLUDE_CONTENT")
+    customer_org_alias: str = Field(
+        default="", max_length=200, pattern=r"^[\x20-\x7E]*$",
+        validation_alias="MOYAI_CUSTOMER_ORG_ALIAS",
+    )
+    default_model: str = Field(
+        default="openai/gpt-6-astra", validation_alias=AliasChoices("MOYAI_MODEL", "AGENT_MODEL")
+    )
+    model_catalog: str = Field(default="", validation_alias="MOYAI_MODELS")
+    mcp_allowed_origins: list[str] = Field(default_factory=list, validation_alias="MOYAI_MCP_ALLOWED_ORIGINS")
+    temporal_address: str = Field(default="127.0.0.1:7233", validation_alias="TEMPORAL_ADDRESS")
+    temporal_namespace: str = Field(default="default", validation_alias="TEMPORAL_NAMESPACE")
+    temporal_queue: str = Field(default="moyai-pydantic-v1", validation_alias="TEMPORAL_TASK_QUEUE")
+    worker_deployment: str = Field(
+        default="", pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,127})?$",
+        validation_alias="MOYAI_WORKER_DEPLOYMENT",
+    )
+    worker_build_id: str = Field(
+        default="", pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,127})?$",
+        validation_alias="MOYAI_WORKER_BUILD_ID",
+    )
+    worker_adoption_bridge: bool = Field(default=False, validation_alias="MOYAI_WORKER_ADOPTION_BRIDGE")
+    temporal_api_key: SecretStr = Field(default=SecretStr(""), validation_alias="TEMPORAL_API_KEY")
+    temporal_tls: bool = Field(default=False, validation_alias="TEMPORAL_TLS")
+    compress_temporal_payloads: bool = Field(
+        default=False, validation_alias="MOYAI_COMPRESS_TEMPORAL_PAYLOADS",
+    )
+    history_continue_bytes: int = Field(
+        default=8 * 1024 * 1024, ge=16384, le=20 * 1024 * 1024,
+        validation_alias="MOYAI_HISTORY_CONTINUE_BYTES",
+    )
+    history_continue_events: int = Field(
+        default=8000, ge=100, le=10000, validation_alias="MOYAI_HISTORY_CONTINUE_EVENTS",
+    )
+    worker_shutdown_seconds: int = Field(
+        default=0, ge=0, le=240, validation_alias="MOYAI_WORKER_SHUTDOWN_SECONDS",
+    )
+    http_shutdown_seconds: int = Field(
+        default=20, ge=1, le=270, validation_alias="MOYAI_HTTP_SHUTDOWN_SECONDS",
+    )
+    temporal_worker_activities: int = Field(default=120, ge=1, le=10000, validation_alias="TEMPORAL_WORKER_ACTIVITIES")
+    temporal_workflow_cache_size: int = Field(default=200, ge=0, le=100000, validation_alias="TEMPORAL_WORKFLOW_CACHE_SIZE")
+    temporal_dispatch_concurrency: int = Field(default=10, ge=1, le=1000, validation_alias="TEMPORAL_DISPATCH_CONCURRENCY")
+    temporal_dispatch_batch_size: int = Field(default=200, ge=1, le=10000, validation_alias="TEMPORAL_DISPATCH_BATCH_SIZE")
+    modal_app: str = Field(
+        default="moyai-pydantic",
+        validation_alias=AliasChoices("MOYAI_MODAL_APP", "MODAL_APP_NAME"),
+    )
+    modal_runtime: Literal["gvisor", "vm"] = Field(
+        default="vm",
+        validation_alias=AliasChoices("MOYAI_MODAL_RUNTIME", "MODAL_FUNCTION_RUNTIME"),
+    )
+    sandbox_provider: Literal["modal", "lambda"] = Field(default="modal", validation_alias="SANDBOX_PROVIDER")
+    lambda_region: str = Field(default="us-east-1", validation_alias="LAMBDA_REGION")
+    lambda_profile: str = Field(default="", validation_alias="LAMBDA_PROFILE")
+    lambda_image: str = Field(default="", validation_alias="LAMBDA_IMAGE")
+    lambda_image_version: str = Field(default="", validation_alias="LAMBDA_IMAGE_VERSION")
+    lambda_checkpoint_bucket: str = Field(default="", validation_alias="LAMBDA_CHECKPOINT_BUCKET")
+    lambda_checkpoint_prefix: str = Field(
+        default="moyai-native-lambda", pattern=r"^[A-Za-z0-9_-][A-Za-z0-9_/-]*$",
+        validation_alias="LAMBDA_CHECKPOINT_PREFIX",
+    )
+    lambda_execution_role_arn: str = Field(default="", validation_alias="LAMBDA_EXECUTION_ROLE_ARN")
+    lambda_egress_connector: str = Field(default="", validation_alias="LAMBDA_EGRESS_CONNECTOR")
+    lambda_checkpoint_timeout: int = Field(
+        default=900, ge=30, le=900, validation_alias="SNAPSHOT_TIMEOUT_SECONDS",
+    )
+    computer_lifetime: int = Field(default=3600, ge=60, le=86400, validation_alias="MOYAI_COMPUTER_TIMEOUT")
+    computer_idle_timeout: int = Field(
+        default=600, ge=60, le=86400, validation_alias="MOYAI_COMPUTER_IDLE_TIMEOUT"
+    )
+    # Replay-only: new turns and delegates have no model-request-count cap.
+    model_request_limit: int = Field(default=100, ge=1, le=1000, validation_alias="MOYAI_MODEL_CALL_LIMIT")
+    model_timeout_seconds: int = Field(default=300, ge=10, le=900, validation_alias="MOYAI_MODEL_TIMEOUT")
+    optional_question_timeout_seconds: int = Field(
+        default=90, ge=5, le=900, validation_alias="MOYAI_OPTIONAL_QUESTION_TIMEOUT",
+    )
+    secure_cookies: bool = Field(default=False, validation_alias="MOYAI_SECURE_COOKIES")
+    public_url: str = Field(default="", validation_alias=AliasChoices("MOYAI_PUBLIC_URL", "PUBLIC_URL"))
+    slack_signing_secret: SecretStr = Field(default=SecretStr(""), validation_alias="SLACK_SIGNING_SECRET")
+    slack_bot_token: SecretStr = Field(default=SecretStr(""), validation_alias="SLACK_BOT_TOKEN")
+    slack_team_id: str = Field(default="", validation_alias="SLACK_TEAM_ID")
+    artifact_bucket: str = Field(default="", validation_alias="MOYAI_ARTIFACT_BUCKET")
+    artifact_endpoint: str = Field(default="", validation_alias="MOYAI_ARTIFACT_ENDPOINT")
+    artifact_region: str = Field(default="us-east-1", validation_alias="MOYAI_ARTIFACT_REGION")
+    artifact_prefix: str = Field(default="moyai", validation_alias="MOYAI_NATIVE_ARTIFACT_PREFIX")
+    artifact_access_key_id: SecretStr = Field(
+        default=SecretStr(""), validation_alias="OBJECT_STORAGE_ACCESS_KEY_ID",
+    )
+    artifact_secret_access_key: SecretStr = Field(
+        default=SecretStr(""), validation_alias="OBJECT_STORAGE_SECRET_ACCESS_KEY",
+    )
+    artifact_session_token: SecretStr = Field(
+        default=SecretStr(""), validation_alias="OBJECT_STORAGE_SESSION_TOKEN",
+    )
+
+    @field_validator("mcp_allowed_origins")
+    @classmethod
+    def validate_mcp_origins(cls, values: list[str]) -> list[str]:
+        for value in values:
+            parsed = urlsplit(value)
+            if (
+                parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.path not in {"", "/"} or parsed.query or parsed.fragment
+                or any(ord(char) <= 32 or ord(char) == 127 for char in value) or "\\" in value
+            ):
+                raise ValueError("MCP allowlist entries must be HTTP(S) origins without paths or credentials.")
+            # Accessing port also rejects malformed and out-of-range ports.
+            _ = parsed.port
+        return values
+
+    @model_validator(mode="after")
+    def tracing_configuration(self) -> Settings:
+        if bool(self.trace_endpoint) != bool(self.trace_api_key.get_secret_value()):
+            raise ValueError("Set both LITELLM_TRACE_ENDPOINT and LITELLM_TRACE_API_KEY.")
+        if self.trace_endpoint:
+            parsed = urlsplit(self.trace_endpoint)
+            if (
+                parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment or not parsed.path.endswith("/v1/traces")
+                or "\\" in self.trace_endpoint
+                or any(ord(char) <= 32 or ord(char) == 127 for char in self.trace_endpoint)
+            ):
+                raise ValueError("Use an HTTP(S) trace endpoint ending in /v1/traces, without URL credentials.")
+            _ = parsed.port
+            if parsed.scheme == "http" and not (
+                parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+                or parsed.hostname.endswith((".svc", ".svc.cluster.local"))
+            ):
+                raise ValueError("Trace endpoints require HTTPS outside loopback or cluster service addresses.")
+        return self
+
+    @model_validator(mode="after")
+    def worker_version_is_complete(self) -> Settings:
+        if bool(self.worker_deployment) != bool(self.worker_build_id):
+            raise ValueError("Worker deployment name and build ID must be configured together.")
+        if self.worker_adoption_bridge and (self.product_mode != "existing" or not self.worker_deployment):
+            raise ValueError("Worker adoption bridging requires an existing product and an explicit worker version.")
+        return self
+
+    @property
+    def models(self) -> list[str]:
+        return list(dict.fromkeys([
+            self.default_model,
+            *(value.strip() for value in self.model_catalog.split(",") if value.strip()),
+        ]))
+
+    @property
+    def sqlalchemy_url(self) -> str:
+        value = self.database_url
+        if value.startswith(("postgres://", "postgresql://")):
+            return "postgresql+asyncpg://" + value.split("://", 1)[1]
+        return value or f"sqlite+aiosqlite:///{self.data_dir.resolve() / 'moyai.db'}"
+
+    @property
+    def postgres_url(self) -> str | None:
+        if self.sqlalchemy_url.startswith("postgresql+asyncpg://"):
+            return self.sqlalchemy_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+        return None
+
+    @cached_property
+    def master_key(self) -> bytes:
+        """Use an explicit key in production, or one private local development key."""
+        supplied = self.encryption_key.get_secret_value()
+        if supplied:
+            if len(supplied) < 32:
+                raise ValueError("ENCRYPTION_KEY must contain at least 32 characters.")
+            return base64.urlsafe_b64encode(hashlib.sha256(supplied.encode()).digest())
+        if self.postgres_url:
+            raise ValueError("PostgreSQL deployments require a shared ENCRYPTION_KEY.")
+        self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = self.data_dir / ".master-key"
+        if path.is_file():
+            value = path.read_bytes()
+        else:
+            value = base64.urlsafe_b64encode(secrets.token_bytes(32))
+            descriptor, temporary = tempfile.mkstemp(prefix=".key-", dir=self.data_dir)
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(value)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                try:
+                    os.link(temporary, path)
+                except FileExistsError:
+                    value = path.read_bytes()
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+        if len(base64.urlsafe_b64decode(value)) != 32:
+            raise ValueError("Invalid local master key.")
+        return value
+
+    def validate_worker(self, *, brokered: bool = False) -> None:
+        if self.sandbox_provider == "lambda" and not all((
+            self.lambda_region, self.lambda_image, self.lambda_image_version, self.lambda_checkpoint_bucket,
+        )):
+            raise ValueError("Lambda requires LAMBDA_REGION, LAMBDA_IMAGE, LAMBDA_IMAGE_VERSION and LAMBDA_CHECKPOINT_BUCKET.")
+        if not self.gateway_url.strip():
+            raise ValueError("Set LITELLM_API_BASE before starting an execution worker.")
+        if not self.gateway_key.get_secret_value() and not (
+            self.product_mode == "existing" and brokered
+        ):
+            raise ValueError("Set LITELLM_API_KEY before starting an execution worker.")
+        origin = urlsplit(self.gateway_url)
+        if origin.username or origin.password or not (
+            origin.scheme == "https"
+            or (origin.scheme == "http" and origin.hostname in {"localhost", "127.0.0.1", "::1"})
+        ):
+            raise ValueError("The model gateway must use HTTPS or an explicit loopback test endpoint.")
+

@@ -1,0 +1,537 @@
+"""Real Slack ingress keeps control and ownership fences ahead of input preparation."""
+
+import json
+from types import SimpleNamespace
+
+import httpx
+import pytest
+import pytest_asyncio
+import test_context_slack as context_tests
+from app.connector_errors import ConnectorError
+from fastapi import HTTPException
+from sqlalchemy import select
+
+from moyai.models import Delivery, Session, Turn
+from moyai.product_slack_models import ProductSlackBinding, SlackTurnSource
+from moyai.skill_mentions import marker
+
+bridge = context_tests.bridge
+slack = context_tests.slack
+ingress = context_tests.ingress
+
+
+def followup(text: str, *, mentioned: bool = False):
+    return context_tests.envelope({
+        **context_tests.mention_message(),
+        "type": "app_mention" if mentioned else "message",
+        "ts": "1792255890.001",
+        "text": ("<@UBOT00001> " if mentioned else "") + text,
+        "files": [{"id": "FTEST0001"}],
+    })
+
+
+async def forbid_prepare(*args, **kwargs):
+    pytest.fail("Controls and ineligible conversations must not prepare files or thread context.")
+
+
+async def test_inline_slack_selection_is_authorized_and_normalized_before_admission(ingress, actor, monkeypatch):
+    runtime, service = ingress.runtime, ingress.service
+    actor.product_grant = ingress.grant
+    runtime.product_identity = service.product.identity
+    selections = []
+
+    async def invocation(grant, reference, *, shared):
+        assert grant == ingress.grant and shared
+        selections.append(reference)
+        return {"reference": "org:team", "name": "team", "icon": "auto",
+                "instructions": "Real saved instructions.", "supporting_files": {}}
+
+    runtime.product_skill_catalog = SimpleNamespace(invocation=invocation)
+    message = {**context_tests.mention_message(), "text": "<@UBOT00001> can you use /team for this?"}
+    await service.receive_payload(context_tests.envelope(message))
+    async with runtime.database.sessions() as db:
+        turn = await db.scalar(select(Turn))
+        prompt = runtime.security.unseal(turn.prompt).decode()
+    assert selections == ["team"]
+    assert prompt == "can you use " + marker("org:team", "auto") + " for this?"
+    assert "Real saved instructions." not in prompt
+    from moyai.models import MessageSource
+    original = {**message, "channel": context_tests.CHANNEL}
+    for index, text, expected in [
+        (1, 'Explain "use /team"', []),
+        (2, "Please use /team.", ["org:team"]),
+    ]:
+        changed = {**original, "text": "<@UBOT00001> " + text, "edited": {"ts": f"179225590{index}.001"}}
+        payload = context_tests.envelope(original)
+        payload["event"] = {
+            "type": "message", "subtype": "message_changed", "channel": context_tests.CHANNEL,
+            "previous_message": original, "message": changed,
+        }
+        assert (await service.receive_payload(payload))["updated"]
+        async with runtime.database.sessions() as db:
+            source = await db.get(MessageSource, f"user:{turn.id}")
+            assert json.loads(runtime.security.unseal(source.data))["skill_references"] == expected
+    await runtime.database.claim_next()
+    changed["text"] = '<@UBOT00001> Explain "use /team"'
+    changed["edited"]["ts"] = "1792255903.001"
+    assert (await service.receive_payload(payload))["updated"]
+    async with runtime.database.sessions() as db:
+        source = await db.get(MessageSource, f"user:{turn.id}")
+        assert json.loads(runtime.security.unseal(source.data))["skill_references"] == ["org:team"]
+    ingress.authority["current"] = False
+    with pytest.raises(HTTPException):
+        await service.receive_payload(followup("use /team", mentioned=True))
+
+
+async def test_invalid_slack_selection_has_visible_notice_without_model_work(ingress, actor, monkeypatch):
+    runtime, service = ingress.runtime, ingress.service
+    actor.product_grant = ingress.grant
+    runtime.product_identity = service.product.identity
+
+    async def unavailable(*args, **kwargs):
+        raise HTTPException(422, "Unavailable skill")
+
+    runtime.product_skill_catalog = SimpleNamespace(invocation=unavailable)
+    message = {**context_tests.mention_message(), "text": "<@UBOT00001> use /missing"}
+    await service.receive_payload(context_tests.envelope(message))
+    async with runtime.database.sessions() as db:
+        turns = list(await db.scalars(select(Turn)))
+        deliveries = list(await db.scalars(select(Delivery)))
+    assert len(turns) == 1 and turns[0].status == "completed"
+    assert turns[0].request_key.startswith("invalid-input:")
+    assert deliveries
+
+
+@pytest_asyncio.fixture
+async def conversation(ingress, monkeypatch):
+    async def request(method, url, **kwargs):
+        return {"ok": True, "messages": [context_tests.root_message()], "has_more": False}
+
+    monkeypatch.setattr(ingress.service.connectors, "request", request)
+    await ingress.service.receive_payload(context_tests.envelope(context_tests.mention_message()))
+    async with ingress.runtime.database.sessions() as db:
+        binding = await db.scalar(select(ProductSlackBinding))
+    return binding
+
+
+async def test_top_level_mention_does_not_add_a_reaction(ingress, monkeypatch):
+    service = ingress.service
+    calls = []
+    order = []
+
+    async def request(method, url, **kwargs):
+        if url == "https://slack.com/api/reactions.add":
+            calls.append((method, url, kwargs))
+            order.append("reaction")
+            return {"ok": True}
+        return {"ok": True, "messages": [context_tests.root_message()], "has_more": False}
+
+    monkeypatch.setattr(service.connectors, "request", request)
+
+    message = context_tests.mention_message()
+    message.pop("thread_ts")
+    await service.receive_payload(context_tests.envelope(message))
+
+    assert calls == []
+    assert order == []
+
+async def test_admission_wakes_status_and_delivery_lanes(ingress, monkeypatch):
+    service, runtime = ingress.service, ingress.runtime
+
+    async def request(method, url, **kwargs):
+        if url == "https://slack.com/api/reactions.add":
+            return {"ok": True}
+        return {"ok": True, "messages": [context_tests.root_message()], "has_more": False}
+
+    monkeypatch.setattr(service.connectors, "request", request)
+    runtime.slack_activity.wake.clear()
+    service.delivery_wakeup.clear()
+
+    await service.receive_payload(context_tests.envelope(context_tests.mention_message()))
+
+    assert runtime.slack_activity.wake.is_set()
+    assert service.delivery_wakeup.is_set()
+
+
+async def test_bound_thread_followup_does_not_add_a_reaction(ingress, conversation, monkeypatch):
+    service = ingress.service
+    calls = []
+
+    async def request(method, url, **kwargs):
+        if url == "https://slack.com/api/reactions.add":
+            calls.append((method, kwargs))
+            return {"ok": True}
+        return {"ok": True, "messages": [context_tests.root_message()], "has_more": False}
+
+    monkeypatch.setattr(service.connectors, "request", request)
+    await service.receive_payload(followup("An ordinary followup."))
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("state,accepted", [
+    ("bound", True), ("unbound", False), ("paused", False), ("disabled", False),
+])
+async def test_sdk_followup_routing_preserves_session_and_product_policy(
+    ingress, conversation, monkeypatch, state, accepted,
+):
+    service, runtime = ingress.service, ingress.runtime
+    payload = followup("Continue the original task.")
+    payload["event"].pop("files")
+    if state == "unbound":
+        payload["event"]["thread_ts"] = "1792255700.000"
+    elif state == "paused":
+        await service.set_paused(conversation.session_id, True)
+    elif state == "disabled":
+        service.settings.slack_thread_chat_enabled = False
+    monkeypatch.setattr(service.files, "prepare", forbid_prepare)
+
+    # Retry the same delivery: a routed follow-up must still produce only one turn.
+    await service.receive_payload(payload)
+    await service.receive_payload(payload)
+
+    async with runtime.database.sessions() as db:
+        turns = list(await db.scalars(select(Turn)))
+        sessions = list(await db.scalars(select(Session)))
+        sources = list(await db.scalars(select(SlackTurnSource)))
+    assert len(sessions) == 1
+    assert len(turns) == 1 + int(accepted)
+    assert all(turn.session_id == conversation.session_id for turn in turns)
+    assert sum(source.message_ts == payload["event"]["ts"] for source in sources) == int(accepted)
+
+
+async def test_unaddressed_top_level_message_is_not_acknowledged(ingress, monkeypatch):
+    calls = []
+
+    async def request(method, url, **kwargs):
+        calls.append(url)
+        return {"ok": True}
+
+    monkeypatch.setattr(ingress.service.connectors, "request", request)
+    message = {**context_tests.mention_message(), "type": "message", "text": "Unaddressed top-level message."}
+    message.pop("thread_ts")
+
+    await ingress.service.receive_payload(context_tests.envelope(message))
+
+    assert "https://slack.com/api/reactions.add" not in calls
+
+
+async def test_missing_scope_acknowledgement_does_not_block_turn_admission(ingress, monkeypatch):
+    service, runtime = ingress.service, ingress.runtime
+
+    async def request(method, url, **kwargs):
+        if url == "https://slack.com/api/reactions.add":
+            response = {"ok": False, "error": "missing_scope"}
+            raise ConnectorError("The app rejected this operation.", code=response["error"], rejected=True)
+        return {"ok": True, "messages": [context_tests.root_message()], "has_more": False}
+
+    monkeypatch.setattr(service.connectors, "request", request)
+
+    await service.receive_payload(context_tests.envelope(context_tests.mention_message()))
+
+    async with runtime.database.sessions() as db:
+        assert len(list(await db.scalars(select(Turn)))) == 1
+
+
+async def test_unexpected_attachment_read_error_is_logged_and_does_not_drop_turn(
+    ingress, monkeypatch, caplog,
+):
+    service, runtime = ingress.service, ingress.runtime
+
+    async def unexpected_error(*args):
+        raise RuntimeError("synthetic attachment reader failure")
+
+    async def request(method, url, **kwargs):
+        if url == "https://slack.com/api/reactions.add":
+            return {"ok": True}
+        return {"ok": True, "messages": [context_tests.root_message()], "has_more": False}
+
+    monkeypatch.setattr(service.files.reader, "read", unexpected_error)
+    monkeypatch.setattr(service.connectors, "request", request)
+    await service.receive_payload(context_tests.envelope({
+        **context_tests.mention_message(), "files": [{"id": "FTEST0001"}],
+    }))
+    turn = await runtime.database.claim_next()
+    prepared = await runtime.admission.prepare(turn.id)
+
+    assert "file_unavailable" in prepared.prompt
+    assert any(
+        record.name == "moyai.product_slack_files"
+        and record.getMessage() == "Slack attachment read unavailable (RuntimeError)"
+        and not record.exc_info
+        for record in caplog.records
+    )
+    assert "synthetic attachment reader failure" not in caplog.text
+    async with runtime.database.sessions() as db:
+        assert len(list(await db.scalars(select(Turn)))) == 1
+
+
+async def test_admission_persists_slack_origin_once_for_duplicate_delivery(ingress, monkeypatch):
+    service, runtime = ingress.service, ingress.runtime
+
+    async def request(method, url, **kwargs):
+        if url == "https://slack.com/api/reactions.add":
+            return {"ok": True}
+        return {"ok": True, "messages": [context_tests.root_message()], "has_more": False}
+
+    monkeypatch.setattr(service.connectors, "request", request)
+    payload = context_tests.envelope(context_tests.mention_message())
+    await service.receive_payload(payload)
+    await service.receive_payload(payload)
+
+    async with runtime.database.sessions() as db:
+        source_rows = list(await db.scalars(select(SlackTurnSource)))
+        assert len(source_rows) == 1
+        assert source_rows[0].message_ts == context_tests.MENTION_TS
+
+
+@pytest.mark.parametrize("command,expected", [
+    ("status", "This thread is listening."),
+    ("stop", "Requested a stop"),
+    ("sleep", "Paused this thread"),
+    ("wake", "Listening again"),
+    ("model test", "New messages in this session will use test"),
+    ("answer My answer", "This session is not waiting for an answer."),
+    ("continue", "This session is not waiting for an answer."),
+])
+async def test_controls_bypass_input_readers(ingress, conversation, monkeypatch, command, expected):
+    service, runtime = ingress.service, ingress.runtime
+    monkeypatch.setattr(service.files, "prepare", forbid_prepare)
+
+    await service.receive_payload(followup("/" + command, mentioned=True))
+
+    async with runtime.database.sessions() as db:
+        turns = list(await db.scalars(select(Turn)))
+        binding = await db.get(ProductSlackBinding, conversation.session_id)
+        session = await db.get(Session, conversation.session_id)
+    controls = [turn for turn in turns if runtime.security.unseal(turn.prompt).decode() == "Slack control"]
+    assert len(turns) == 2 and len(controls) == 1
+    assert controls[0].status == "completed"
+    assert expected in runtime.security.unseal(controls[0].result).decode()
+    assert binding.paused is (command == "sleep")
+    assert session.model == "test"
+
+
+@pytest.mark.parametrize("command", ["sleep", "wake"])
+async def test_duplicate_control_events_preserve_confirmation(ingress, conversation, monkeypatch, command):
+    service, runtime = ingress.service, ingress.runtime
+
+    async def admitted_grant(db, actor):
+        assert actor.id == ingress.grant.user_id
+        await service.product.identity.require_current(ingress.grant)
+        return ingress.grant
+
+    monkeypatch.setattr(runtime.database, "_actor_product_grant", admitted_grant)
+    payload = followup(command, mentioned=True)
+    await service.receive_payload(payload)
+    # Slack sends distinct app_mention and message events for the same message.
+    duplicate = context_tests.envelope({**payload["event"], "type": "message"})
+    await service.receive_payload(duplicate)
+
+    async with runtime.database.sessions() as db:
+        deliveries = list(await db.scalars(select(Delivery)))
+        binding = await db.get(ProductSlackBinding, conversation.session_id)
+    assert binding.paused is (command == "sleep")
+    assert len(deliveries) == 1
+    assert deliveries[0].status == "pending"
+
+    requests = []
+
+    async def receive(request):
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "ts": "1792255891.001"})
+
+    async with httpx.AsyncClient(
+        base_url="https://slack.test/api/", transport=httpx.MockTransport(receive),
+    ) as client:
+        await service.pump(client)
+        await service.receive_payload(duplicate)
+        await service.pump(client)
+    assert len(requests) == 1
+    assert requests[0].url.path == "/api/chat.postMessage"
+    posted = json.loads(requests[0].content)
+    assert posted["channel"] == context_tests.CHANNEL
+    assert posted["thread_ts"] == context_tests.ROOT_TS
+    assert posted["text"] == {
+        "sleep": "Paused this thread and requested a stop. Say wake or mention Moyai to continue.",
+        "wake": "Listening again. Send your next message here.",
+    }[command]
+    async with runtime.database.sessions() as db:
+        assert (await db.get(Delivery, deliveries[0].id)).status == "sent"
+
+
+@pytest.mark.parametrize("command,allowed", [
+    ("status", True), ("wake", True),
+    ("sleep", False), ("stop", False), ("model test", False),
+    ("answer My answer", False), ("continue", False),
+])
+async def test_paused_thread_accepts_only_unmentioned_status_and_wake(
+    ingress, conversation, monkeypatch, command, allowed,
+):
+    service, runtime = ingress.service, ingress.runtime
+    await service.set_paused(conversation.session_id, True)
+    monkeypatch.setattr(service.files, "prepare", forbid_prepare)
+
+    await service.receive_payload(followup("/" + command))
+
+    async with runtime.database.sessions() as db:
+        turns = list(await db.scalars(select(Turn)))
+        binding = await db.get(ProductSlackBinding, conversation.session_id)
+    assert len(turns) == 1 + int(allowed)
+    assert binding.paused is (command != "wake")
+    if allowed:
+        control = next(turn for turn in turns if turn.request_key.startswith("command:"))
+        assert control.status == "completed"
+        expected = "This thread is paused." if command == "status" else "Listening again"
+        assert expected in runtime.security.unseal(control.result).decode()
+
+
+async def test_pause_during_file_read_prevents_followup_admission(ingress, conversation, monkeypatch):
+    service, runtime = ingress.service, ingress.runtime
+    reads = []
+
+    async def pause_during_read(*args):
+        reads.append("files")
+        await service.set_paused(conversation.session_id, True)
+        return {"uploads": [], "images": [], "context": ""}
+
+    monkeypatch.setattr(service.files, "prepare", pause_during_read)
+    await service.receive_payload(followup("An ordinary followup with a file."))
+
+    async with runtime.database.sessions() as db:
+        turns = list(await db.scalars(select(Turn)))
+        binding = await db.get(ProductSlackBinding, conversation.session_id)
+    assert reads == ["files"]
+    assert len(turns) == 1 and binding.paused
+
+
+@pytest.mark.parametrize("field", ["private_owner_id", "deleted_at"])
+async def test_historical_privacy_fence_precedes_input_readers(ingress, monkeypatch, field):
+    service, runtime = ingress.service, ingress.runtime
+    source = service.store.create_run(
+        "Historical thread", "", "demo", [], chat_enabled=True, user_id="google:owner",
+        private_owner_id="google:owner" if field == "private_owner_id" else "",
+    )
+    service.store.execute(
+        "INSERT INTO slack_threads(team_id,channel,thread_ts,run_id,started_ts) VALUES(?,?,?,?,?)",
+        (context_tests.TEAM, context_tests.CHANNEL, context_tests.ROOT_TS, source["id"], context_tests.ROOT_TS),
+    )
+    if field == "deleted_at":
+        service.store.execute("UPDATE runs SET deleted_at=? WHERE id=?", ("2026-10-17", source["id"]))
+    monkeypatch.setattr(service.files, "prepare", forbid_prepare)
+
+    with pytest.raises(HTTPException, match="private or deleted") as error:
+        await service.receive_payload(followup("Review this thread.", mentioned=True))
+    assert error.value.status_code == 403
+    async with runtime.database.sessions() as db:
+        assert list(await db.scalars(select(Turn))) == []
+
+
+@pytest.mark.parametrize("quote", [
+    "`<@UBOT00001>`", "```\n<@UBOT00001>\n```", "> <@UBOT00001>",
+    ">>>\n<@UBOT00001>", "`<@UBOT00001>", "```\n<@UBOT00001>",
+])
+async def test_quoted_mentions_do_not_start_a_conversation(ingress, monkeypatch, quote):
+    service, runtime = ingress.service, ingress.runtime
+    monkeypatch.setattr(service.files, "prepare", forbid_prepare)
+
+    await service.receive_payload(followup("A literal example:\n" + quote))
+
+    async with runtime.database.sessions() as db:
+        assert list(await db.scalars(select(Turn))) == []
+
+
+async def test_addressed_message_preserves_mentions_inside_quotes(ingress, conversation):
+    service, runtime = ingress.service, ingress.runtime
+    question = "Explain this literal example: `<@UBOT00001> status`"
+    payload = followup(question, mentioned=True)
+    del payload["event"]["files"]
+
+    await service.receive_payload(payload)
+
+    async with runtime.database.sessions() as db:
+        turns = list(await db.scalars(select(Turn)))
+    assert len(turns) == 2
+    assert any(runtime.security.unseal(turn.prompt).decode().startswith(question) for turn in turns)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("ts", "not-a-timestamp"), ("thread_ts", "1792259999.001"),
+    ("channel", "C!INVALID"), ("text", {"not": "a string"}),
+])
+async def test_malformed_message_is_rejected_before_input_readers(ingress, monkeypatch, field, value):
+    service, runtime = ingress.service, ingress.runtime
+    monkeypatch.setattr(service.files, "prepare", forbid_prepare)
+    payload = followup("Review this thread.", mentioned=True)
+    payload["event"][field] = value
+
+    with pytest.raises(HTTPException) as error:
+        await service.receive_payload(payload)
+    assert error.value.status_code == 400
+    async with runtime.database.sessions() as db:
+        assert list(await db.scalars(select(Turn))) == []
+
+
+@pytest.mark.parametrize("text", ["!aside Keep this out of context.", "(aside) A human discussion.", "!ASIDE Private note."])
+async def test_addressed_asides_do_not_start_a_conversation(ingress, monkeypatch, text):
+    service, runtime = ingress.service, ingress.runtime
+    monkeypatch.setattr(service.files, "prepare", forbid_prepare)
+
+    await service.receive_payload(followup(text, mentioned=True))
+
+    async with runtime.database.sessions() as db:
+        assert list(await db.scalars(select(Turn))) == []
+
+
+@pytest.mark.parametrize("channel_type", [None, "channel", "mpim"])
+async def test_dm_requires_explicit_direct_channel_type(ingress, monkeypatch, channel_type):
+    service, runtime = ingress.service, ingress.runtime
+    monkeypatch.setattr(service.files, "prepare", forbid_prepare)
+    payload = followup("Read this attachment.")
+    payload["event"]["channel"] = "DTEST0001"
+    if channel_type is not None:
+        payload["event"]["channel_type"] = channel_type
+
+    await service.receive_payload(payload)
+
+    async with runtime.database.sessions() as db:
+        assert list(await db.scalars(select(Turn))) == []
+
+
+async def test_signed_edits_update_queued_input_but_never_rerun_started_work(ingress, conversation, monkeypatch):
+    from moyai.models import Message, MessageSource
+    service, runtime = ingress.service, ingress.runtime
+    async with runtime.database.sessions() as db:
+        turn = await db.scalar(select(Turn))
+        count_before = len(list(await db.scalars(select(Turn))))
+    original = context_tests.mention_message()
+    original['channel'] = context_tests.CHANNEL
+    changed = {**original, 'text': '<@UBOT00001> updated task', 'edited': {'ts': '1792255900.001'}}
+    payload = context_tests.envelope(original)
+    payload['event'] = {'type': 'message', 'subtype': 'message_changed', 'channel': context_tests.CHANNEL,
+                        'previous_message': original, 'message': changed, 'event_ts': '1792255900.001'}
+    assert (await service.receive_payload(payload))['updated']
+    async with runtime.database.sessions() as db:
+        fresh = await db.get(Turn, turn.id)
+        assert runtime.security.unseal(fresh.prompt).decode().startswith('updated task')
+        assert len(list(await db.scalars(select(Turn)))) == count_before
+    await runtime.database.claim_next()
+    prepared = await runtime.admission.prepare(turn.id)
+    changed['text'] = '<@UBOT00001> second edit after starting'
+    changed['edited']['ts'] = '1792255910.001'
+    assert (await service.receive_payload(payload))['updated']
+    async with runtime.database.sessions() as db:
+        fresh = await db.get(Turn, turn.id)
+        assert runtime.security.unseal(fresh.prompt).decode() == prepared.prompt
+        message = await db.scalar(select(Message).where(Message.turn_id == turn.id))
+        assert runtime.security.unseal(message.content).decode() == 'second edit after starting'
+        source = await db.get(MessageSource, message.identity)
+        assert not source.mirror
+    deleted = {**payload, 'event': {'type': 'message', 'subtype': 'message_deleted',
+        'channel': context_tests.CHANNEL, 'previous_message': changed,
+        'deleted_ts': original['ts'], 'event_ts': '1792255920.001'}}
+    assert (await service.receive_payload(deleted))['updated']
+    messages = await runtime.database.messages(await runtime.database.user(turn.actor_id), turn.session_id)
+    assert messages[0]['content'] == '' and messages[0]['deleted']
+    assert messages[0]['edited_after_start']
+    assert not (await service.receive_payload(payload))['updated']  # late edit cannot resurrect a deletion
