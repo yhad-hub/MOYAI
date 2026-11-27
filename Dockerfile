@@ -1,5 +1,5 @@
 FROM ghcr.io/astral-sh/uv:0.11.17 AS uv
-FROM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS native-ui
+FROM node:26-bookworm-slim@sha256:0042e17d232a87a2cd485be1da7900fca4d10a4ad11b29e9285da1d2e54798c9 AS native-ui
 WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci
